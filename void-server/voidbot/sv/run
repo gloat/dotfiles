@@ -1,0 +1,4 @@
+#!/bin/sh
+# voidbot: void-media Worker events -> IRC (source: ~/gloating/voidbot)
+exec 2>&1
+exec chpst -u _voidbot:_voidbot /usr/local/bin/voidbot -config /etc/voidbot/config.json

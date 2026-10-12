@@ -1,0 +1,12 @@
+#!/bin/sh
+# /etc/cron.daily/lego-renew (snooze-daily runs it): renews each cert when it's due, else does nothing.
+# --dynamic: renew at 1/3 of the lifetime left (Let's Encrypt lifetimes are shrinking), ARI on top.
+export CF_DNS_API_TOKEN_FILE=/etc/lego/cf-token
+lego() { /usr/bin/lego --email <redacted:email> --dns cloudflare --dns.resolvers 1.1.1.1:53 \
+    --key-type ec256 --path /etc/lego "$@"; }
+
+lego --domains irc.gloat.ing renew --dynamic --renew-hook /etc/lego/ergo-hook
+irc=$?
+lego --domains gloat.ing --domains www.gloat.ing renew --dynamic --renew-hook /etc/lego/web-hook
+web=$?
+[ "$irc" -eq 0 ] && [ "$web" -eq 0 ]

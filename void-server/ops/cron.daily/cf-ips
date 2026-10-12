@@ -1,0 +1,127 @@
+#!/bin/bash
+# cf-ips: keeps Cloudflare's edge IP ranges current in the three places that hard-code them:
+#   1. fail2ban ignoreip (jail.local)
+#   2. ufw 80/443 allow rules (the ones with comment 'cloudflare'; new ones copy their form)
+#   3. OpenResty's set_real_ip_from list (cloudflare-realip.conf)
+# The realip file is updated last and doubles as the record of the previous list, so a run
+# that fails halfway is simply finished by the next one.
+# Install: sudo install -m 755 cf-ips /etc/cron.daily/cf-ips (snooze-daily runs it).
+# Silent when nothing changed; changes go to stdout + syslog (tag cf-ips).
+# Usage: cf-ips [-n] [-f]   -n = dry run (show what would change), -f = skip the sanity limit
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+REALIP=${REALIP:-/usr/local/openresty/nginx/conf/cloudflare-realip.conf}
+JAIL=${JAIL:-/etc/fail2ban/jail.local}
+URL4=${URL4:-https://www.cloudflare.com/ips-v4}
+URL6=${URL6:-https://www.cloudflare.com/ips-v6}
+UFW=${UFW:-ufw}
+OPENRESTY=${OPENRESTY:-/usr/local/openresty/bin/openresty}
+F2B=${F2B:-fail2ban-client}
+
+dry=0 force=0
+for a in "$@"; do
+    case $a in
+        -n) dry=1 ;;
+        -f) force=1 ;;
+        *) echo "usage: cf-ips [-n] [-f]" >&2; exit 2 ;;
+    esac
+done
+
+say() { echo "cf-ips: $*"; [ "$dry" = 1 ] || logger -t cf-ips -- "$*" 2>/dev/null || true; }
+die() { echo "cf-ips: $*" >&2; [ "$dry" = 1 ] || logger -t cf-ips -p user.err -- "$*" 2>/dev/null || true; exit 1; }
+run() { if [ "$dry" = 1 ]; then echo "  would run: $*"; else "$@" >/dev/null; fi; }
+
+# --- fetch + validate (one CIDR per line; the last line has no newline) ---
+fetch() { curl -fsS --max-time 20 --retry 3 "$1" | tr -d '\r' | awk 'NF'; }
+v4=$(fetch "$URL4") || die "fetching $URL4 failed"
+v6=$(fetch "$URL6") || die "fetching $URL6 failed"
+grep -Evq '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' <<<"$v4" && die "unexpected line in $URL4"
+grep -Eviq '^[0-9a-f:]+/[0-9]{1,3}$' <<<"$v6" && die "unexpected line in $URL6"
+[ "$(wc -l <<<"$v4")" -ge 8 ] && [ "$(wc -l <<<"$v6")" -ge 4 ] || die "list too short, not trusting it"
+
+new=$(printf '%s\n%s\n' "$v4" "$v6")          # Cloudflare's order, used when writing
+new_sorted=$(sort <<<"$new")
+old=$(sed -n 's/^set_real_ip_from \([^;]*\);.*/\1/p' "$REALIP")
+old_sorted=$(sort <<<"$old")
+
+# Sanity limit: a list that drops more than half of the known ranges is more likely broken than real.
+if [ -n "$old" ] && [ "$force" = 0 ]; then
+    gone=$(comm -23 <(echo "$old_sorted") <(echo "$new_sorted") | wc -l)
+    [ "$gone" -le "$(( $(wc -l <<<"$old") / 2 ))" ] || die "new list drops $gone of the current ranges; check it, then rerun with -f"
+fi
+in_new() { grep -qxF -- "$1" <<<"$new"; }
+is_cf()  { in_new "$1" || grep -qxF -- "$1" <<<"$old"; }
+
+# --- 1. fail2ban ignoreip: keep the non-Cloudflare entries, then the current ranges ---
+line=$(grep -m1 '^ignoreip *=' "$JAIL") || die "no ignoreip line in $JAIL"
+keep=()
+for t in ${line#*=}; do is_cf "$t" || keep+=("$t"); done
+want="ignoreip = ${keep[*]} $(echo $new)"
+if [ "$line" != "$want" ]; then
+    say "fail2ban ignoreip: $(comm -13 <(echo "$old_sorted") <(echo "$new_sorted") | wc -l) added, $(comm -23 <(echo "$old_sorted") <(echo "$new_sorted") | wc -l) removed"
+    if [ "$dry" = 1 ]; then
+        echo "  would set: $want"
+    else
+        tmp=$(mktemp)
+        awk -v want="$want" 'done == 0 && /^ignoreip *=/ { print want; done = 1; next } { print }' "$JAIL" > "$tmp"
+        cat "$tmp" > "$JAIL" && rm -f "$tmp"     # cat keeps the file's owner/mode
+        $F2B reload >/dev/null
+    fi
+fi
+
+# --- 2. ufw: add the new ranges first (no gap), then delete the dropped ones ---
+if [ "$dry" = 1 ] && [ "$(id -u)" != 0 ] && [ "$UFW" = ufw ]; then
+    echo "  (ufw skipped: reading its rules needs root)"
+else
+    added=$($UFW show added) || die "ufw show added failed"
+    rules=$(grep "comment 'cloudflare'" <<<"$added" || true)
+    if [ -z "$rules" ]; then
+        say "warning: no ufw rules with comment 'cloudflare' to copy, ufw left alone"
+    else
+        cidr_of() { sed -E 's/.* from ([^ ]+) .*/\1/' <<<"$1"; }
+        # every distinct rule form (e.g. one rule for 80,443/tcp), with the address as @
+        forms=$(sed -E 's/ from [^ ]+ / from @ /' <<<"$rules" | sort -u)
+        have=$(while IFS= read -r r; do cidr_of "$r"; done <<<"$rules" | sort -u)
+        for c in $(comm -13 <(echo "$have") <(echo "$new_sorted")); do
+            say "ufw: allowing $c"
+            while IFS= read -r f; do
+                read -ra args <<<"${f//\'/}"             # "ufw allow from @ ... comment cloudflare"
+                run $UFW "${args[@]:1}"
+            done <<<"${forms//@/$c}"
+        done
+        while IFS= read -r r; do
+            c=$(cidr_of "$r")
+            in_new "$c" && continue
+            say "ufw: removing $c"
+            r=${r% comment *}
+            read -ra args <<<"$r"
+            run $UFW --force delete "${args[@]:1}"
+        done <<<"$rules"
+    fi
+fi
+
+# --- 3. OpenResty real-IP list (last: it records what the other two were set from) ---
+if [ "$old_sorted" != "$new_sorted" ]; then
+    say "openresty set_real_ip_from: rewriting $REALIP"
+    tmp=$(mktemp)
+    {
+        echo "# Cloudflare edge ranges (https://www.cloudflare.com/ips), updated by cf-ips $(date +%F)."
+        echo "# Requests from these IPs get \$remote_addr from CF-Connecting-IP; anyone else can't spoof it."
+        while IFS= read -r c; do echo "set_real_ip_from $c;"; done <<<"$new"
+        echo "real_ip_header CF-Connecting-IP;"
+    } > "$tmp"
+    if [ "$dry" = 1 ]; then
+        diff "$REALIP" "$tmp" | sed 's/^/  /' || true
+        rm -f "$tmp"
+    else
+        cp "$REALIP" "$REALIP.prev"
+        cat "$tmp" > "$REALIP" && rm -f "$tmp"
+        if $OPENRESTY -t -q; then
+            $OPENRESTY -s reload
+        else
+            cp "$REALIP.prev" "$REALIP"
+            die "openresty -t failed with the new list; restored the old one"
+        fi
+    fi
+fi

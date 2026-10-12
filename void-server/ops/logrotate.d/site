@@ -1,0 +1,41 @@
+# /etc/logrotate.d/site: run daily by snooze-daily (/etc/cron.daily/logrotate).
+# "weekly"/"monthly" are set in each block so they win over the global "size 512k".
+
+# Web logs hold visitor IPs + GeoIP locations: keep 8 weeks, then they're gone.
+/var/log/openresty/access.log /var/log/openresty/error.log /var/log/openresty/naxsi.log /var/log/openresty/blocked.log /var/log/openresty/stall.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0644 root root
+    sharedscripts
+    postrotate
+        /usr/local/openresty/bin/openresty -s reopen >/dev/null 2>&1 || true
+    endscript
+}
+
+/var/log/fail2ban.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0600 root root
+    postrotate
+        /usr/bin/fail2ban-client flushlogs >/dev/null 2>&1 || true
+    endscript
+}
+
+# Ergo can't be told to reopen its log, so copy + truncate in place.
+/var/lib/ergo/ircd.log {
+    su _ergo _ergo
+    monthly
+    rotate 6
+    compress
+    missingok
+    notifempty
+    copytruncate
+}

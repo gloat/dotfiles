@@ -1,0 +1,18 @@
+{
+  "server": "127.0.0.1:6667",
+  "nick": "voidbot",
+  "sasl_password": "FILLED-IN-BY-INSTALL",
+  "ops_channel": "#ops",
+  "ops_key": "FILLED-IN-BY-INSTALL",
+  "public_channel": "",
+  "public_skip": ["public/"],
+  "owner_accounts": ["gloat"],
+  "owner_nick": "gloat",
+  "admin_url": "https://media.gloat.ing/_op/admin",
+  "admin_token": "FILLED-IN-BY-INSTALL",
+  "poll_seconds": 30,
+  "max_lines": 8,
+  "state_file": "/var/lib/voidbot/state.json",
+  "budget_warn": [0.8, 0.9, 0.95],
+  "sysinfo_file": "/var/lib/voidbot-pub/sysinfo.json"
+}

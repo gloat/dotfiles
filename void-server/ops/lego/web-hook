@@ -1,0 +1,10 @@
+#!/bin/sh
+# /etc/lego/web-hook: lego run/renew hook for gloat.ing. Copies the new cert + key into OpenResty's
+# conf dir and reloads, but only if the config tests OK (a failed test keeps the running workers).
+set -eu
+D=/usr/local/openresty/nginx/conf/cert/lego
+mkdir -p "$D"
+install -m 644 "$LEGO_CERT_PATH" "$D/gloat.ing.crt"
+install -m 600 "$LEGO_CERT_KEY_PATH" "$D/gloat.ing.key"
+/usr/local/openresty/bin/openresty -t -q
+/usr/local/openresty/bin/openresty -s reload

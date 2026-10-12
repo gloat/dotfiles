@@ -1,0 +1,90 @@
+#!/bin/bash
+# backup: an encrypted copy of everything on the VPS that would be hard to rebuild by hand:
+# server configs (OpenResty, Ergo, voidbot, lego, fail2ban, ufw, ssh, runit services, cron),
+# Ergo's account/channel database, the Cloudflare/R2/operator secrets, and the site + project
+# sources (no media: those live on R2 and the PC). Encrypted with age to a public key only, so
+# this machine can make backups but can never read them; the private key stays on the PC.
+# Output: $OUT/gloat-YYYYmmdd-HHMM.tar.xz.age (root:gloat 640, so the PC can scp it as gloat);
+# the newest $KEEP are kept. Logs one line to syslog (tag backup).
+# Install: sudo install -m 755 backup /etc/cron.daily/backup (snooze-daily runs it)
+#          + the PC's age public key in /etc/backup/recipients (one "age1..." line).
+# Usage: backup [-n]   -n = dry run (list what would go in, write nothing)
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RECIPIENTS=${RECIPIENTS:-/etc/backup/recipients}
+OUT=${OUT:-/var/backups/gloat}
+KEEP=${KEEP:-14}
+OWNER=${OWNER:-gloat}
+WEB=usr/local/openresty/nginx/html
+
+# Paths relative to / (missing ones are skipped). ircd.db is Ergo's buntdb file: append-only,
+# so a copy taken while Ergo runs can at most miss the write in progress (buntdb drops a
+# half-written last entry on load).
+PATHS=(
+    usr/local/openresty/nginx/conf
+    "$WEB"
+    var/lib/ergo/ircd.yaml var/lib/ergo/ircd.db var/lib/ergo/ircd.motd
+    var/lib/ergo/irc.gloat.ing.crt var/lib/ergo/irc.gloat.ing.key
+    etc/voidbot var/lib/voidbot
+    etc/lego
+    etc/fail2ban etc/ufw etc/ssh
+    etc/sv/ergo etc/sv/voidbot etc/sv/openresty
+    etc/cron.daily etc/logrotate.d/site etc/hosts etc/sudoers etc/sudoers.d
+    home/gloat/gloating home/gloat/.bin home/gloat/.ssh/authorized_keys
+    home/gloat/.config/cloudflare home/gloat/.config/void-op home/gloat/.config/rclone
+)
+EXCLUDES=(
+    --exclude=node_modules
+    --exclude='*.mp4' --exclude='*.mp3' --exclude='*.mp3.def' --exclude='*.webm' --exclude='*.mkv'
+    # site images and font sources are on the PC; the served woff2 subsets stay in
+    --exclude="$WEB/*.jpg" --exclude="$WEB/*.png" --exclude="$WEB/*.webp" --exclude="$WEB/*.ttf"
+    --exclude=home/gloat/gloating/voidbot/voidbot   # build output (install.sh rebuilds it)
+)
+
+dry=0
+for a in "$@"; do
+    case $a in
+        -n) dry=1 ;;
+        *) echo "usage: backup [-n]" >&2; exit 2 ;;
+    esac
+done
+
+cd /
+present=()
+for p in "${PATHS[@]}"; do
+    if [[ -e $p ]]; then present+=("$p"); else echo "backup: skipping missing /$p" >&2; fi
+done
+
+if (( dry )); then
+    tar -c "${EXCLUDES[@]}" "${present[@]}" 2>/dev/null | tar -tv | awk '{s += $3; n++; print} END {printf "%d entries, %.1f MB before compression\n", n, s / 1e6}'
+    exit 0
+fi
+
+(( EUID == 0 )) || { echo "backup: run as root (sudo)" >&2; exit 1; }
+grep -q '^age1' "$RECIPIENTS" 2>/dev/null || { echo "backup: no age public key in $RECIPIENTS" >&2; exit 1; }
+
+install -d -m 750 -o root -g "$OWNER" "$OUT"
+name="gloat-$(date +%Y%m%d-%H%M).tar.xz.age"
+tmp="$OUT/.$name.part"
+trap 'rm -f "$tmp"' EXIT
+
+# tar exits 1 for "file changed as we read it" (a log or the db being written): still a good copy.
+set +o pipefail
+tar -c "${EXCLUDES[@]}" --warning=no-file-changed "${present[@]}" | xz -T1 -6 | age -R "$RECIPIENTS" > "$tmp"
+st=("${PIPESTATUS[@]}")
+set -o pipefail
+if (( st[0] > 1 || st[1] != 0 || st[2] != 0 )); then
+    logger -t backup "FAILED (tar ${st[0]}, xz ${st[1]}, age ${st[2]})"
+    echo "backup: failed (tar ${st[0]}, xz ${st[1]}, age ${st[2]})" >&2
+    exit 1
+fi
+
+chown "root:$OWNER" "$tmp"; chmod 640 "$tmp"
+mv "$tmp" "$OUT/$name"
+trap - EXIT
+
+# Keep the newest $KEEP.
+ls -1t "$OUT"/gloat-*.tar.xz.age | tail -n +$((KEEP + 1)) | xargs -r rm -f --
+
+logger -t backup "wrote $OUT/$name ($(du -h "$OUT/$name" | cut -f1))"

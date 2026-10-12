@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# optool: operator keys, the upload pause switch and the review queue for the void-media Worker
+# (src/op.js). Keys and secrets go to Cloudflare with wrangler (needs ~/.config/cloudflare/token);
+# the review commands read the void-incoming bucket with rclone (remote "r2").
+#
+#   optool init                       make OP_COOKIE_SECRET + OP_ADMIN_TOKEN and upload both (once)
+#   optool key new <channel> [label]  a new key of 3 Quake 3 words (--strong: 3 of 7,776 EFF words),
+#                                     printed once; only its hash is kept
+#   optool key set <channel> "<words>" [label]  your own words (new channel, or a new key for one:
+#                                     operators already in stay in; revoke to throw them out)
+#   optool key revoke <channel>       the channel's cookies stop working on their next request
+#   optool key list
+#   optool status | pause | resume    storage used vs the hard stop / stop or allow new uploads + links
+#   optool events [n]                 the last n (30) events of the queue voidbot posts to IRC
+#   optool pending                    files waiting for review (channel, credit, size, comment)
+#   optool links                      submitted links
+#   optool sessions [channel]         who entered a key (ip, country, network, browser)
+#   optool get <path> [dir]           download one pending file (default dir ~/incoming-review)
+#   optool rm <path>                  delete one pending file
+#   optool purge <channel>            delete everything a channel uploaded
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+WORKER_DIR="$(dirname "$HERE")"
+CONF="$HOME/.config/void-op"
+KEYS="$CONF/keys.json"          # {channel: {hash, label, created}}: hashes only, never the keys
+ADMIN="$CONF/admin-token"
+WORDS="$HERE/eff_large_wordlist.txt"       # key new --strong
+Q3WORDS="$HERE/quake3_wordlist.txt"        # key new (easier to remember)
+BUCKET="r2:void-incoming"
+API="${OPTOOL_API:-https://media.gloat.ing/_op/admin}"
+UA="Mozilla/5.0 (optool)"
+
+die() { echo "optool: $*" >&2; exit 1; }
+NO_BUCKET="rclone can't read $BUCKET (does this machine's R2 token include the void-incoming bucket?)"
+
+wrangler() {
+  local token
+  token="$(cat "$HOME/.config/cloudflare/token" 2>/dev/null)" || die "no ~/.config/cloudflare/token"
+  (cd "$WORKER_DIR" && CLOUDFLARE_API_TOKEN="$token" npx wrangler "$@")
+}
+
+# Same normalization as normalizeKey() in src/op.js: lowercase words joined by "-"
+key_hash() {
+  printf '%s' "$1" | tr 'A-Z' 'a-z' | grep -o '[a-z0-9]\+' | paste -sd- | tr -d '\n' | sha256sum | cut -d' ' -f1
+}
+
+# push_keys <file>: upload that key list as OP_KEYS (hash + label only)
+push_keys() {
+  python3 -c '
+import json, sys
+keys = json.load(open(sys.argv[1]))
+print(json.dumps({c: {"hash": v["hash"], "label": v.get("label") or c} for c, v in keys.items()}))
+' "$1" | wrangler secret put OP_KEYS
+}
+
+# commit_keys <tmp file>: upload it, and only then make it the local list (a failed upload changes nothing)
+commit_keys() {
+  if push_keys "$1"; then
+    mv "$1" "$KEYS"
+  else
+    rm -f "$1"
+    die "uploading OP_KEYS failed: nothing changed"
+  fi
+}
+
+# admin_call <json body>: the Worker's raw JSON answer
+admin_call() {
+  [ -f "$ADMIN" ] || die "run optool init first"
+  curl -sS -A "$UA" -X POST -H "authorization: Bearer $(cat "$ADMIN")" -H "content-type: application/json" \
+    -d "$1" "$API"
+}
+
+admin() {
+  admin_call "{\"action\":\"$1\",\"by\":\"optool\"}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+if "error" in d: sys.exit("optool: the Worker said " + d["error"])
+gb = lambda n: f"{n / 1e9:,.1f} GB"
+used = d["stored"] + d["reserved"]
+print(f"uploads:  {"PAUSED" if d["paused"] else "open"}")
+print(f"storage:  {gb(used)} of {gb(d["budget"])} ({used / d["budget"] * 100:.1f}%)  ~${used / 1e9 * 0.015:.2f}/month")
+print(f"          stored {gb(d["stored"])} + reserved {gb(d["reserved"])} ({d["inFlight"]} uploads in flight)")
+print(f"channels: {" ".join(d["channels"]) or "(none)"}")
+'
+}
+
+# Every JSON file under a bucket folder, as one JSON list (rclone cat concatenates them)
+cat_json() {
+  local raw
+  raw="$(rclone cat "$BUCKET/$1" "${@:2}" 2>/dev/null)" || die "$NO_BUCKET"
+  printf '%s' "$raw" | python3 -c '
+import json, sys
+text, out, dec, i = sys.stdin.read(), [], json.JSONDecoder(), 0
+while True:
+    while i < len(text) and text[i].isspace(): i += 1
+    if i >= len(text): break
+    obj, i = dec.raw_decode(text, i)
+    out.append(obj)
+print(json.dumps(out))
+'
+}
+
+# save_key <channel> <key> <label>: store its hash (refusing a key another channel already uses) and upload
+save_key() {
+  local tmp
+  tmp="$(mktemp "$CONF/keys.XXXXXX")"
+  python3 -c '
+import json, sys, datetime
+path, channel, h, label = sys.argv[1:5]
+keys = json.load(open(path))
+for other, v in keys.items():
+    if other != channel and v["hash"] == h: sys.exit(f"optool: channel {other} already uses that key")
+old = keys.get(channel, {})
+keys[channel] = {"hash": h, "label": label or old.get("label") or channel, "created": datetime.date.today().isoformat()}
+json.dump(keys, open(sys.argv[5], "w"), indent=1)
+' "$KEYS" "$1" "$(key_hash "$2")" "$3" "$tmp" || { rm -f "$tmp"; exit 1; }
+  commit_keys "$tmp"
+}
+
+valid_channel() {
+  [[ "$1" =~ ^[a-z0-9-]{1,40}$ ]] || die "channel: 1-40 of a-z 0-9 - (e.g. defrag-main)"
+}
+
+channel_exists() {
+  python3 -c 'import json,sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1])) else 1)' "$KEYS" "$1"
+}
+
+mkdir -p "$CONF"
+chmod 700 "$CONF"
+[ -f "$KEYS" ] || echo '{}' > "$KEYS"
+
+case "${1:-}" in
+  init)
+    [ -f "$ADMIN" ] && die "already initialized ($ADMIN exists)"
+    openssl rand -hex 32 > "$ADMIN"
+    chmod 600 "$ADMIN"
+    openssl rand -hex 32 | wrangler secret put OP_COOKIE_SECRET
+    wrangler secret put OP_ADMIN_TOKEN < "$ADMIN"
+    echo "done: OP_COOKIE_SECRET and OP_ADMIN_TOKEN are set (the admin token is kept in $ADMIN)"
+    ;;
+
+  key)
+    case "${2:-}" in
+      new)
+        list="$Q3WORDS"
+        if [ "${3:-}" = "--strong" ]; then list="$WORDS"; shift; fi
+        channel="${3:-}"
+        valid_channel "$channel"
+        channel_exists "$channel" && die "channel $channel exists (key set gives it a new key, revoke removes it)"
+        [ -s "$list" ] || die "wordlist missing: $list"
+        key="$(python3 -c '
+import secrets, sys
+words = [l.split("\t")[-1].strip() for l in open(sys.argv[1]) if l.strip()]
+print(" ".join(secrets.choice(words) for _ in range(3)))
+' "$list")"
+        save_key "$channel" "$key" "${4:-}"
+        echo
+        echo "channel $channel: $key"
+        echo "(shown once: only its hash was saved; case, spaces and dashes don't matter when typed)"
+        ;;
+      set)
+        channel="${3:-}"
+        valid_channel "$channel"
+        words="$(printf '%s' "${4:-}" | tr 'A-Z' 'a-z' | grep -o '[a-z0-9]\+' | paste -sd' ' || true)"
+        [ "$(wc -w <<< "$words")" -ge 3 ] || die 'key set <channel> "<at least 3 words>" [label]'
+        [ "${#words}" -ge 14 ] || die "too short: use longer words (at least 14 letters in all)"
+        replacing=""
+        channel_exists "$channel" && replacing=1
+        save_key "$channel" "$words" "${5:-}"
+        echo "channel $channel: $words"
+        [ -n "$replacing" ] && echo "(the old key no longer works; operators who already entered it stay in until you revoke the channel)"
+        true
+        ;;
+      revoke)
+        channel="${3:-}"
+        tmp="$(mktemp "$CONF/keys.XXXXXX")"
+        python3 -c '
+import json, sys
+path, channel, out = sys.argv[1:4]
+keys = json.load(open(path))
+if channel not in keys: sys.exit(f"optool: no channel {channel}")
+del keys[channel]
+json.dump(keys, open(out, "w"), indent=1)
+' "$KEYS" "$channel" "$tmp" || { rm -f "$tmp"; exit 1; }
+        commit_keys "$tmp"
+        echo "revoked $channel (its operators are out on their next request; optool purge $channel deletes its uploads)"
+        ;;
+      list)
+        python3 -c '
+import json, sys
+for c, v in json.load(open(sys.argv[1])).items(): print(f"{c:24} {v.get("label", c):24} since {v.get("created", "?")}")
+' "$KEYS"
+        ;;
+      *) die "key new|set|revoke|list" ;;
+    esac
+    ;;
+
+  status) admin status ;;
+  pause) admin pause ;;
+  resume) admin resume ;;
+
+  events)
+    n="${2:-30}"
+    [[ "$n" =~ ^[0-9]{1,4}$ ]] || die "events [n]"
+    admin_call "{\"action\":\"events\",\"tail\":$n}" | python3 -c '
+import json, sys, datetime
+d = json.load(sys.stdin)
+if "error" in d: sys.exit("optool: the Worker said " + d["error"])
+mb = lambda n: f"{(n or 0) / 1e6:,.1f} MB"
+for e in d["events"]:
+    at = datetime.datetime.fromtimestamp(e["at"] / 1000).strftime("%m-%d %H:%M")
+    k = e["kind"]
+    who = (e.get("sender") or "?") + ("" if e.get("credit") else " (anon)")
+    line = {
+        "key-ok": lambda: f"{e["channel"]} {e["sid"]}  {e["ip"]} {e["country"]} {e.get("isp", "")}",
+        "key-fail": lambda: f"{e["ip"]} {e["country"]} {e.get("isp", "")}",
+        "link": lambda: f"{who}  {e["url"]}",
+        "upload": lambda: f"{who}  {mb(e["size"])}  {e["key"]}",
+        "upload-rejected": lambda: f"{e["error"]}  {e["key"]}",
+        "upload-refused": lambda: f"{e["error"]}  {e["name"]}  {e["channel"]} {e["ip"]}",
+        "pause": lambda: f"by {e.get("by")}",
+        "resume": lambda: f"by {e.get("by")}",
+        "media-add": lambda: f"{mb(e["size"])}  {e["key"]}" + ("  (replaced)" if e.get("replaced") else ""),
+        "media-rm": lambda: f"{mb(e["size"])}  {e["key"]}",
+    }.get(k, lambda: json.dumps({x: y for x, y in e.items() if x not in ("id", "at", "kind")}))()
+    print(f"{at}  {k:15} {line}")
+if not d["events"]: print("no events")
+print(f"uploads {"PAUSED" if d["paused"] else "open"}, storage {d["used"] / 1e9:,.1f} of {d["budget"] / 1e9:,.0f} GB")
+'
+    ;;
+
+  pending)
+    rows="$(rclone lsjson -R -M --files-only --exclude "_log/**" --exclude "_links/**" "$BUCKET" 2>/dev/null)" || die "$NO_BUCKET"
+    printf '%s' "$rows" | python3 -c '
+import json, sys
+rows = json.load(sys.stdin)
+if not rows: print("nothing waiting"); sys.exit()
+for r in sorted(rows, key=lambda r: r["ModTime"]):
+    m = r.get("Metadata", {})
+    who = (m.get("sender") or "?") + ("" if m.get("credit") == "1" else " (anon)")
+    print(f"{r["ModTime"][:16]}  {r["Size"] / 1e6:10,.1f} MB  {who:22} {m.get("country", ""):3} {r["Path"]}")
+    if m.get("comment"): print(" " * 45 + "> " + m["comment"])
+'
+    ;;
+
+  links)
+    data="$(cat_json "_links/")"
+    printf '%s' "$data" | python3 -c '
+import json, sys
+links = sorted(json.load(sys.stdin), key=lambda l: l["at"])
+if not links: print("no links")
+for l in links:
+    who = (l.get("sender") or "?") + ("" if l.get("credit") else " (anon)")
+    print(f"{l["at"][:16]}  {who:22} {l.get("country", ""):3} {l["url"]}")
+    for k in ("title", "comment"):
+        if l.get(k): print(f"{"":45}{k}: {l[k]}")
+'
+    ;;
+
+  sessions)
+    filter=()
+    [ -n "${2:-}" ] && filter=(--include "**/${2}-*.json")
+    data="$(cat_json "_log/sessions/" "${filter[@]}")"
+    printf '%s' "$data" | python3 -c '
+import json, sys
+for s in sorted(json.load(sys.stdin), key=lambda s: s["at"]):
+    print(f"{s["at"][:16]}  {s["channel"]:16} {s["sid"]}  {s["ip"]:39} {s.get("country", "")} {s.get("city", "")}  {s.get("isp", "")}")
+    print(f"{"":19}{s.get("ua", "")[:110]}")
+'
+    ;;
+
+  get)
+    [ -n "${2:-}" ] || die "get <path> [dir]"
+    dest="${3:-$HOME/incoming-review}"
+    mkdir -p "$dest"
+    # copyto takes the path literally ([brackets] in names are no glob here)
+    rclone copyto -P "$BUCKET/$2" "$dest/$(basename "$2")"
+    ;;
+
+  rm)
+    [ -n "${2:-}" ] || die "rm <path>"
+    rclone deletefile "$BUCKET/$2" && echo "deleted $2"
+    ;;
+
+  purge)
+    channel="${2:-}"
+    [[ "$channel" =~ ^[a-z0-9-]{1,40}$ ]] || die "purge <channel>"
+    rclone size "$BUCKET/$channel" 2>/dev/null || die "nothing under $channel"
+    read -r -p "delete everything $channel uploaded? [y/N] " yes
+    # delete, not purge: purge first asks for the bucket's versioning status, which an
+    # object-only R2 token may not read (a harmless but noisy 403)
+    [ "$yes" = y ] && rclone delete "$BUCKET/$channel" && echo "purged $channel"
+    ;;
+
+  *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac

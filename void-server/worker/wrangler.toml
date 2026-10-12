@@ -1,0 +1,49 @@
+# Worker in front of the R2 bucket on media.gloat.ing: serves objects only to
+# visitors with the void_auth cookie (set by /void/login, see void_auth.lua).
+# Deploy: env CLOUDFLARE_API_TOKEN=(cat ~/.config/cloudflare/token) npx wrangler deploy
+# Secrets (wrangler secret put): VOID_AUTH_TOKEN = the void_auth cookie value;
+# OP_COOKIE_SECRET (signs void_op), OP_ADMIN_TOKEN (optool pause/resume/status),
+# OP_KEYS (channel keys; written by tools/optool, never by hand).
+name = "void-media"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+account_id = "<redacted:account-id>"
+workers_dev = false
+preview_urls = false
+# Uncomment once the R2 custom domain media.gloat.ing has been removed:
+routes = [{ pattern = "media.gloat.ing", custom_domain = true }]
+
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "void-media"
+jurisdiction = "us"
+
+# Operator uploads (src/op.js): never served, reviewed with rclone (tools/optool)
+[[r2_buckets]]
+binding = "INCOMING"
+bucket_name = "void-incoming"
+jurisdiction = "us"
+
+# Rate limits, daily byte counters, the pause switch and the storage hard stop (src/ledger.js)
+[[durable_objects.bindings]]
+name = "LEDGER"
+class_name = "Ledger"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Ledger"]
+
+# Upload limits. GB = 10^9 bytes. STORAGE_BUDGET_GB is the hard stop for both
+# buckets together (R2 standard storage is $0.015/GB-month: 1950 GB ~ $29).
+[vars]
+OP_MAX_FILE_GB = 100
+OP_DAY_GB = 200
+STORAGE_BUDGET_GB = 1950
+OP_KEY_TRIES = 10
+OP_KEY_TRIES_ALL = 300
+OP_LINKS_PER_IP_DAY = 30
+OP_LINKS_PER_DAY = 500
+
+# Workers Logs: failed key attempts and rejected uploads (console.log in op.js)
+[observability]
+enabled = true

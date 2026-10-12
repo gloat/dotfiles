@@ -1,0 +1,21 @@
+{
+    "*.json": {
+        "indentchar": "\t",
+        "tabsize": 4
+    },
+    "colorscheme": "twilight",
+    "editorconfigverbose": true,
+    "eofnewline": false,
+    "fastdirty": true,
+    "gofmt": true,
+    "goimports": false,
+    "ignorecase": false,
+    "pluginchannels": [
+        "https://raw.githubusercontent.com/micro-editor/plugin-channel/master/channel.json",
+        "https://github.com/10sr/editorconfig-micro/raw/master/channel.json"
+    ],
+    "pluginrepos": [],
+    "rmtrailingws": true,
+    "softwrap": true,
+    "termtitle": false
+}

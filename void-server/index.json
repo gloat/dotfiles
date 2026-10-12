@@ -1,0 +1,358 @@
+{
+ "repo": "gloat/dotfiles",
+ "branch": "master",
+ "dir": "void-server",
+ "title": "void-server",
+ "blurb": "The box behind gloat.ing: Void Linux on a 1-core VPS, OpenResty at the front, Cloudflare in front of that, media on R2, an IRC server and a bot keeping watch. Secrets are cut out and marked <redacted:…>.",
+ "groups": [
+  {
+   "id": "openresty",
+   "title": "openresty",
+   "blurb": "The web server: TLS, rate limits, NAXSI, the bot filter, and the Lua gate that hands out the media cookie.",
+   "files": [
+    {
+     "path": "openresty/nginx.conf",
+     "lang": "nginx",
+     "desc": "the whole server: TLS 1.3, HTTP/3, rate limits, NAXSI, old /void/ paths redirected to R2",
+     "size": 22121,
+     "lines": 509,
+     "redacted": 2
+    },
+    {
+     "path": "openresty/headers.conf",
+     "lang": "nginx",
+     "desc": "security headers and the CSP (no inline scripts anywhere, so no hashes)",
+     "size": 2802,
+     "lines": 34,
+     "redacted": 0
+    },
+    {
+     "path": "openresty/cloudflare-realip.conf",
+     "lang": "nginx",
+     "desc": "real visitor IPs from Cloudflare's ranges (kept current by cf-ips)",
+     "size": 938,
+     "lines": 25,
+     "redacted": 0
+    },
+    {
+     "path": "openresty/lua/void_auth.lua",
+     "lang": "lua",
+     "desc": "/void/login: passphrase in, HttpOnly cookie out",
+     "size": 1582,
+     "lines": 55,
+     "redacted": 2
+    },
+    {
+     "path": "openresty/lua/dashboard.lua",
+     "lang": "lua",
+     "desc": "/dashboard: a small Lua status page behind basic auth",
+     "size": 6965,
+     "lines": 219,
+     "redacted": 0
+    }
+   ]
+  },
+  {
+   "id": "worker",
+   "title": "cloudflare worker",
+   "blurb": "media.gloat.ing: serves the R2 library to logged-in visitors, draws fancyindex-style listings, and takes operator uploads into a separate bucket.",
+   "files": [
+    {
+     "path": "worker/wrangler.toml",
+     "lang": "ini",
+     "desc": "buckets, the Durable Object, upload limits",
+     "size": 1658,
+     "lines": 49,
+     "redacted": 1
+    },
+    {
+     "path": "worker/src/index.js",
+     "lang": "js",
+     "desc": "router: cookie check, ranges, 304/416, listings, ?download",
+     "size": 6689,
+     "lines": 166,
+     "redacted": 0
+    },
+    {
+     "path": "worker/src/listing.js",
+     "lang": "js",
+     "desc": "directory pages in nginx fancyindex markup, so the old theme still fits",
+     "size": 8384,
+     "lines": 221,
+     "redacted": 0
+    },
+    {
+     "path": "worker/src/auth.js",
+     "lang": "js",
+     "desc": "cookie helpers shared by media and /_op/",
+     "size": 1100,
+     "lines": 30,
+     "redacted": 0
+    },
+    {
+     "path": "worker/src/op.js",
+     "lang": "js",
+     "desc": "/_op/: channel keys, links, multipart uploads, the admin route",
+     "size": 22210,
+     "lines": 544,
+     "redacted": 0
+    },
+    {
+     "path": "worker/src/ledger.js",
+     "lang": "js",
+     "desc": "Durable Object (SQLite): rate limits, daily bytes, pause switch, storage hard stop, event queue",
+     "size": 10358,
+     "lines": 243,
+     "redacted": 0
+    },
+    {
+     "path": "worker/src/filetypes.js",
+     "lang": "js",
+     "desc": "checks an upload's first 4 KB against its extension",
+     "size": 4374,
+     "lines": 95,
+     "redacted": 0
+    },
+    {
+     "path": "worker/tools/optool",
+     "lang": "sh",
+     "desc": "operator tool: channel keys, review queue, pause/resume, purge",
+     "size": 12155,
+     "lines": 297,
+     "redacted": 0
+    }
+   ]
+  },
+  {
+   "id": "voidbot",
+   "title": "voidbot",
+   "blurb": "A small Go bot on the IRC server: posts uploads and library changes, answers !status, and writes the numbers the site's terminal shows.",
+   "files": [
+    {
+     "path": "voidbot/main.go",
+     "lang": "go",
+     "desc": "IRC connection, SASL with back-off, poll loop, owner-only commands",
+     "size": 12278,
+     "lines": 429,
+     "redacted": 0
+    },
+    {
+     "path": "voidbot/report.go",
+     "lang": "go",
+     "desc": "events to grouped IRC lines; strips control codes from user text",
+     "size": 11121,
+     "lines": 405,
+     "redacted": 0
+    },
+    {
+     "path": "voidbot/worker.go",
+     "lang": "go",
+     "desc": "talks to the Worker's admin route",
+     "size": 2863,
+     "lines": 117,
+     "redacted": 0
+    },
+    {
+     "path": "voidbot/sysinfo.go",
+     "lang": "go",
+     "desc": "load, memory, disk, services, IRC users: sysinfo.json every 30 s",
+     "size": 7985,
+     "lines": 329,
+     "redacted": 0
+    },
+    {
+     "path": "voidbot/config.go",
+     "lang": "go",
+     "desc": "config loading and defaults",
+     "size": 3503,
+     "lines": 95,
+     "redacted": 0
+    },
+    {
+     "path": "voidbot/report_test.go",
+     "lang": "go",
+     "desc": "tests: grouping and injection",
+     "size": 4172,
+     "lines": 118,
+     "redacted": 0
+    },
+    {
+     "path": "voidbot/config.example.json",
+     "lang": "json",
+     "desc": "config shape (install.sh fills in the secrets)",
+     "size": 539,
+     "lines": 18,
+     "redacted": 0
+    },
+    {
+     "path": "voidbot/install.sh",
+     "lang": "sh",
+     "desc": "build, system user, config, runit service",
+     "size": 3049,
+     "lines": 76,
+     "redacted": 0
+    },
+    {
+     "path": "voidbot/sv/run",
+     "lang": "sh",
+     "desc": "runit service: drops to its own user",
+     "size": 180,
+     "lines": 4,
+     "redacted": 0
+    },
+    {
+     "path": "voidbot/go.mod",
+     "lang": "ini",
+     "desc": "one dependency: ergochat/irc-go",
+     "size": 81,
+     "lines": 5,
+     "redacted": 0
+    }
+   ]
+  },
+  {
+   "id": "ops",
+   "title": "ops",
+   "blurb": "The chores that keep it running: certificates, Cloudflare's IP list, encrypted backups, log rotation, fail2ban banning at the edge.",
+   "files": [
+    {
+     "path": "ops/cron.daily/backup",
+     "lang": "sh",
+     "desc": "daily tar + xz + age; only the PC holds the key, so the box can't read its own backups",
+     "size": 3831,
+     "lines": 90,
+     "redacted": 0
+    },
+    {
+     "path": "ops/cron.daily/cf-ips",
+     "lang": "sh",
+     "desc": "syncs Cloudflare's ranges into realip, ufw and fail2ban, with sanity checks and rollback",
+     "size": 5940,
+     "lines": 127,
+     "redacted": 0
+    },
+    {
+     "path": "ops/cron.daily/lego-renew",
+     "lang": "sh",
+     "desc": "Let's Encrypt renewals over DNS-01 for the web and IRC certs",
+     "size": 629,
+     "lines": 12,
+     "redacted": 1
+    },
+    {
+     "path": "ops/lego/web-hook",
+     "lang": "sh",
+     "desc": "installs a renewed cert, tests the config, reloads",
+     "size": 469,
+     "lines": 10,
+     "redacted": 0
+    },
+    {
+     "path": "ops/logrotate.d/site",
+     "lang": "ini",
+     "desc": "weekly web/fail2ban logs, monthly IRC log",
+     "size": 1064,
+     "lines": 41,
+     "redacted": 0
+    },
+    {
+     "path": "ops/fail2ban/jail.local",
+     "lang": "ini",
+     "desc": "jails; web bans go to Cloudflare's firewall, ssh stays on ufw",
+     "size": 2662,
+     "lines": 103,
+     "redacted": 3
+    },
+    {
+     "path": "ops/fail2ban/filter.d/nginx-badstuff.conf",
+     "lang": "ini",
+     "desc": "the probe filter: only failed requests count",
+     "size": 2534,
+     "lines": 35,
+     "redacted": 0
+    }
+   ]
+  },
+  {
+   "id": "shell",
+   "title": "shell",
+   "blurb": "Where I actually live on the box: fish, micro, btop, fastfetch.",
+   "files": [
+    {
+     "path": "shell/fish/config.fish",
+     "lang": "sh",
+     "desc": "eza, bat, fzf, ps helpers, a few cd shortcuts",
+     "size": 1452,
+     "lines": 48,
+     "redacted": 0
+    },
+    {
+     "path": "shell/fish/fish_plugins",
+     "lang": "",
+     "desc": "fisher + tide (the prompt)",
+     "size": 39,
+     "lines": 2,
+     "redacted": 0
+    },
+    {
+     "path": "shell/micro/settings.json",
+     "lang": "json",
+     "desc": "the editor: twilight, softwrap, gofmt on save",
+     "size": 551,
+     "lines": 21,
+     "redacted": 0
+    },
+    {
+     "path": "shell/btop/btop.conf",
+     "lang": "ini",
+     "desc": "btop",
+     "size": 10913,
+     "lines": 286,
+     "redacted": 0
+    },
+    {
+     "path": "shell/fastfetch/config.jsonc",
+     "lang": "json",
+     "desc": "fastfetch layout: tree keys and Nerd Font icons",
+     "size": 4389,
+     "lines": 131,
+     "redacted": 0
+    },
+    {
+     "path": "shell/fastfetch/ascii.txt",
+     "lang": "",
+     "desc": "the logo, in braille",
+     "size": 1105,
+     "lines": 14,
+     "redacted": 0
+    }
+   ]
+  }
+ ],
+ "fetch": {
+  "host": "gloat@void-server",
+  "rows": [
+   [
+    "Host",
+    "Vultr · 1 vCPU"
+   ],
+   [
+    "Web",
+    "OpenResty · NAXSI · Cloudflare"
+   ],
+   [
+    "R2",
+    "media library behind a Worker"
+   ],
+   [
+    "IRC",
+    "Ergo · voidbot (Go)"
+   ],
+   [
+    "Shell",
+    "fish · micro · btop"
+   ]
+  ]
+ },
+ "synced": "2026-10-12T20:50:57Z"
+}
